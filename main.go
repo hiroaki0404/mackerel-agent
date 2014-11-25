@@ -166,7 +166,7 @@ func exitWithoutPidfileCleaning(exitCode int) {
 	os.Exit(exitCode)
 }
 
-const MAX_TERMINATING_INTERVAL = 30 // wait up to 30 seconds for termination
+const MAX_TERMINATING_INTERVAL = 60 // wait up to 60 seconds for termination
 
 func start(conf *config.Config) error {
 	if err := createPidFile(conf.Pidfile); err != nil {

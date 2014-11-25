@@ -109,33 +109,34 @@ const (
 	queueStateFirst queueState = iota
 	queueStateDefault
 	queueStateQueued
+	queueStateTerminated
 )
 
 func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackerel.Host, termChan chan chan int) {
 	metricsResult := ag.Watch()
 
 	postQueue := make(chan []*mackerel.CreatingMetricsValue, conf.Connection.Post_Metrics_Buffer_Size)
-	postDelay := delayByHost(host)
-
-	qState := queueStateFirst
 	go func() {
+		postDelay := delayByHost(host)
+		qState := queueStateFirst
 		exitChan := make(chan int)
-		terminated := false
 		for {
 			select {
 			case exitChan = <-termChan:
 				if len(postQueue) <= 0 {
 					exitChan <- 0
 				} else {
-					terminated = true
+					qState = queueStateTerminated
 				}
 			case values := <-postQueue:
-
 				switch qState {
+				case queueStateTerminated:
+					time.Sleep(time.Duration(1) * time.Second)
 				case queueStateFirst: // request immediately to create graph defs of host
-					// nop
+					qState = queueStateDefault
 				case queueStateQueued:
 					time.Sleep(time.Duration(conf.Connection.Post_Metrics_Dequeue_Delay_Seconds) * time.Second)
+					qState = queueStateDefault
 				default:
 					// Sending data at every 0 second from all hosts causes request flooding.
 					// To prevent flooding, this loop sleeps for some seconds
@@ -143,7 +144,6 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					// The sleep second is up to 60s.
 					time.Sleep(postDelay)
 				}
-				qState = queueStateDefault
 
 				if len(postQueue) > 0 {
 					// Bulk posting. However at most "two" metrics are to be posted, so postQueue isn't always empty yet.
@@ -170,11 +170,12 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					logger.Debugf("Retrying to post metrics...")
 				}
 
-				if terminated {
-					exitChan <- 0
-				}
 				if len(postQueue) > 0 {
-					qState = queueStateQueued
+					if qState != queueStateTerminated {
+						qState = queueStateQueued
+					}
+				} else if qState == queueStateTerminated {
+					exitChan <- 0
 				}
 			}
 		}
