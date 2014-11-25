@@ -111,7 +111,7 @@ const (
 	queueStateQueued
 )
 
-func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackerel.Host) {
+func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackerel.Host, termChan chan chan int) {
 	metricsResult := ag.Watch()
 
 	postQueue := make(chan []*mackerel.CreatingMetricsValue, conf.Connection.Post_Metrics_Buffer_Size)
@@ -119,49 +119,63 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 
 	qState := queueStateFirst
 	go func() {
-		for values := range postQueue {
-			switch qState {
-			case queueStateFirst: // request immediately to create graph defs of host
-				// nop
-			case queueStateQueued:
-				time.Sleep(time.Duration(conf.Connection.Post_Metrics_Dequeue_Delay_Seconds) * time.Second)
-			default:
-				// Sending data at every 0 second from all hosts causes request flooding.
-				// To prevent flooding, this loop sleeps for some seconds
-				// which is specific to the ID of the host running agent on.
-				// The sleep second is up to 60s.
-				time.Sleep(postDelay)
-			}
-			qState = queueStateDefault
-
-			if len(postQueue) > 0 {
-				// Bulk posting. However at most "two" metrics are to be posted, so postQueue isn't always empty yet.
-				logger.Debugf("Merging datapoints with next queued ones")
-				nextValues := <-postQueue
-				values = append(values, nextValues...)
-			}
-
-			tries := conf.Connection.Post_Metrics_Retry_Max
-			for {
-				err := api.PostMetricsValues(values)
-				if err == nil {
-					logger.Debugf("Posting metrics succeeded.")
-					break
+		exitChan := make(chan int)
+		terminated := false
+		for {
+			select {
+			case exitChan = <-termChan:
+				if len(postQueue) <= 0 {
+					exitChan <- 0
+				} else {
+					terminated = true
 				}
-				logger.Errorf("Failed to post metrics value (will retry): %s", err.Error())
+			case values := <-postQueue:
 
-				tries -= 1
-				if tries <= 0 {
-					logger.Errorf("Give up retrying to post metrics.")
-					break
+				switch qState {
+				case queueStateFirst: // request immediately to create graph defs of host
+					// nop
+				case queueStateQueued:
+					time.Sleep(time.Duration(conf.Connection.Post_Metrics_Dequeue_Delay_Seconds) * time.Second)
+				default:
+					// Sending data at every 0 second from all hosts causes request flooding.
+					// To prevent flooding, this loop sleeps for some seconds
+					// which is specific to the ID of the host running agent on.
+					// The sleep second is up to 60s.
+					time.Sleep(postDelay)
+				}
+				qState = queueStateDefault
+
+				if len(postQueue) > 0 {
+					// Bulk posting. However at most "two" metrics are to be posted, so postQueue isn't always empty yet.
+					logger.Debugf("Merging datapoints with next queued ones")
+					nextValues := <-postQueue
+					values = append(values, nextValues...)
 				}
 
-				logger.Debugf("Retrying to post metrics...")
-				time.Sleep(time.Duration(conf.Connection.Post_Metrics_Retry_Delay_Seconds) * time.Second)
-			}
+				tries := conf.Connection.Post_Metrics_Retry_Max
+				for {
+					err := api.PostMetricsValues(values)
+					if err == nil {
+						logger.Debugf("Posting metrics succeeded.")
+						break
+					}
+					logger.Errorf("Failed to post metrics value (will retry): %s", err.Error())
 
-			if len(postQueue) > 0 {
-				qState = queueStateQueued
+					tries -= 1
+					if tries <= 0 {
+						logger.Errorf("Give up retrying to post metrics.")
+						break
+					}
+
+					logger.Debugf("Retrying to post metrics...")
+				}
+
+				if terminated {
+					exitChan <- 0
+				}
+				if len(postQueue) > 0 {
+					qState = queueStateQueued
+				}
 			}
 		}
 	}()
@@ -245,7 +259,7 @@ func Prepare(conf *config.Config) (*mackerel.API, *mackerel.Host, error) {
 }
 
 // Run starts the main metric collecting logic and this function will never return.
-func Run(conf *config.Config, api *mackerel.API, host *mackerel.Host) {
+func Run(conf *config.Config, api *mackerel.API, host *mackerel.Host, termChan chan chan int) {
 	logger.Infof("Start: apibase = %s, hostName = %s, hostId = %s", conf.Apibase, host.Name, host.Id)
 
 	ag := &agent.Agent{
@@ -254,7 +268,7 @@ func Run(conf *config.Config, api *mackerel.API, host *mackerel.Host) {
 	}
 	ag.InitPluginGenerators(api)
 
-	loop(ag, conf, api, host)
+	loop(ag, conf, api, host, termChan)
 }
 
 func pluginGenerators(conf *config.Config) []metrics.PluginGenerator {
