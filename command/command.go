@@ -108,6 +108,7 @@ const (
 	queueStateFirst queueState = iota
 	queueStateDefault
 	queueStateQueued
+	queueStateRetrying
 	queueStateTerminated
 )
 
@@ -149,6 +150,9 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					// nop
 				case queueStateQueued:
 					delaySeconds = conf.Connection.Post_Metrics_Dequeue_Delay_Seconds
+				case queueStateRetrying:
+					logger.Debugf("Retrying to post metrics...")
+					delaySeconds = conf.Connection.Post_Metrics_Retry_Delay_Seconds
 				default:
 					// Sending data at every 0 second from all hosts causes request flooding.
 					// To prevent flooding, this loop sleeps for some seconds
@@ -185,23 +189,20 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					}
 				}
 
-				tries := conf.Connection.Post_Metrics_Retry_Max
-				for {
-					err := api.PostMetricsValues(postValues)
-					if err == nil {
-						logger.Debugf("Posting metrics succeeded.")
-						break
-					}
+				err := api.PostMetricsValues(postValues)
+				if err == nil {
+					logger.Debugf("Posting metrics succeeded.")
+				} else {
 					logger.Errorf("Failed to post metrics value (will retry): %s", err.Error())
-
-					tries -= 1
-					if tries <= 0 {
-						logger.Errorf("Give up retrying to post metrics.")
-						break
+					// XXX: when terminated, manage to retry each seconds until shutdown timeout
+					if qState != queueStateTerminated {
+						qState = queueStateRetrying
 					}
-
-					logger.Debugf("Retrying to post metrics...")
-					time.Sleep(time.Duration(conf.Connection.Post_Metrics_Retry_Delay_Seconds) * time.Second)
+					go func() {
+						for _, v := range postValuesOrg {
+							postQueue <- v
+						}
+					}()
 				}
 
 				if qState == queueStateTerminated && len(postQueue) <= 0 {
