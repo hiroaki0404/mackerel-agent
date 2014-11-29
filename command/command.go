@@ -182,6 +182,7 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					}
 
 					logger.Debugf("Retrying to post metrics...")
+					time.Sleep(time.Duration(conf.Connection.Post_Metrics_Retry_Delay_Seconds) * time.Second)
 				}
 
 				if qState == queueStateTerminated && len(postQueue) <= 0 {
