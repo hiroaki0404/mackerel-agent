@@ -195,7 +195,7 @@ func start(conf *config.Config) error {
 				termChan <- exitChan
 
 				go func() {
-					time.Sleep(MAX_TERMINATING_INTERVAL * time.Second)
+					time.Sleep(time.Duration(MAX_TERMINATING_INTERVAL) * time.Second)
 					exitChan <- 1
 				}()
 				exitCode := <-exitChan
