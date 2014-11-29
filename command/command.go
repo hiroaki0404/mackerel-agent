@@ -164,7 +164,21 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					}
 				}
 
-				time.Sleep(time.Duration(delaySeconds) * time.Second)
+				sleepCh := make(chan struct{})
+				go func() {
+					time.Sleep(time.Duration(delaySeconds) * time.Second)
+					sleepCh <- struct{}{}
+				}()
+			sleepLoop:
+				for {
+					select {
+					case <-sleepCh:
+						break sleepLoop
+					case exitChan = <-termChan:
+						qState = queueStateTerminated
+						break sleepLoop
+					}
+				}
 
 				tries := conf.Connection.Post_Metrics_Retry_Max
 				for {
