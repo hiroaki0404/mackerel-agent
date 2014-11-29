@@ -97,9 +97,9 @@ func prepareHost(root string, api *mackerel.API, roleFullnames []string) (*macke
 // Interval between each updating host specs.
 var specsUpdateInterval = 1 * time.Hour
 
-func delayByHost(host *mackerel.Host) time.Duration {
+func delayByHost(host *mackerel.Host) int {
 	s := sha1.Sum([]byte(host.Id))
-	return time.Duration(int(s[len(s)-1])%int(config.PostMetricsInterval.Seconds())) * time.Second
+	return int(s[len(s)-1]) % int(config.PostMetricsInterval.Seconds())
 }
 
 type queueState int
@@ -116,9 +116,10 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 
 	postQueue := make(chan []*mackerel.CreatingMetricsValue, conf.Connection.Post_Metrics_Buffer_Size)
 	go func() {
-		postDelay := delayByHost(host)
+		postDelaySeconds := delayByHost(host)
 		qState := queueStateFirst
 		exitChan := make(chan int)
+
 		for {
 			select {
 			case exitChan = <-termChan:
@@ -128,28 +129,42 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					qState = queueStateTerminated
 				}
 			case values := <-postQueue:
-				switch qState {
-				case queueStateTerminated:
-					time.Sleep(time.Duration(1) * time.Second)
-				case queueStateFirst: // request immediately to create graph defs of host
-					qState = queueStateDefault
-				case queueStateQueued:
-					time.Sleep(time.Duration(conf.Connection.Post_Metrics_Dequeue_Delay_Seconds) * time.Second)
-					qState = queueStateDefault
-				default:
-					// Sending data at every 0 second from all hosts causes request flooding.
-					// To prevent flooding, this loop sleeps for some seconds
-					// which is specific to the ID of the host running agent on.
-					// The sleep second is up to 60s.
-					time.Sleep(postDelay)
-				}
-
 				if len(postQueue) > 0 {
 					// Bulk posting. However at most "two" metrics are to be posted, so postQueue isn't always empty yet.
 					logger.Debugf("Merging datapoints with next queued ones")
 					nextValues := <-postQueue
 					values = append(values, nextValues...)
 				}
+
+				delaySeconds := 0
+				switch qState {
+				case queueStateTerminated:
+					delaySeconds = 1
+				case queueStateFirst: // request immediately to create graph defs of host
+					// nop
+				case queueStateQueued:
+					delaySeconds = conf.Connection.Post_Metrics_Dequeue_Delay_Seconds
+				default:
+					// Sending data at every 0 second from all hosts causes request flooding.
+					// To prevent flooding, this loop sleeps for some seconds
+					// which is specific to the ID of the host running agent on.
+					// The sleep second is up to 60s.
+					elapsedSeconds := time.Now().Second() % int(config.PostMetricsInterval.Seconds())
+					if postDelaySeconds > elapsedSeconds {
+						delaySeconds = postDelaySeconds - elapsedSeconds
+					}
+				}
+
+				// update queueState before sleeping
+				if qState != queueStateTerminated {
+					if len(postQueue) > 0 {
+						qState = queueStateQueued
+					} else {
+						qState = queueStateDefault
+					}
+				}
+
+				time.Sleep(time.Duration(delaySeconds) * time.Second)
 
 				tries := conf.Connection.Post_Metrics_Retry_Max
 				for {
@@ -169,11 +184,7 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					logger.Debugf("Retrying to post metrics...")
 				}
 
-				if len(postQueue) > 0 {
-					if qState != queueStateTerminated {
-						qState = queueStateQueued
-					}
-				} else if qState == queueStateTerminated {
+				if qState == queueStateTerminated && len(postQueue) <= 0 {
 					exitChan <- 0
 				}
 			}
@@ -270,4 +281,3 @@ func Run(conf *config.Config, api *mackerel.API, host *mackerel.Host, termChan c
 
 	loop(ag, conf, api, host, termChan)
 }
-
