@@ -129,11 +129,16 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 					qState = queueStateTerminated
 				}
 			case values := <-postQueue:
+				postValuesOrg := [][](*mackerel.CreatingMetricsValue){values}
 				if len(postQueue) > 0 {
 					// Bulk posting. However at most "two" metrics are to be posted, so postQueue isn't always empty yet.
 					logger.Debugf("Merging datapoints with next queued ones")
 					nextValues := <-postQueue
-					values = append(values, nextValues...)
+					postValuesOrg = append(postValuesOrg, nextValues)
+				}
+				postValues := [](*mackerel.CreatingMetricsValue){}
+				for _, v := range postValuesOrg {
+					postValues = append(postValues, v...)
 				}
 
 				delaySeconds := 0
@@ -182,7 +187,7 @@ func loop(ag *agent.Agent, conf *config.Config, api *mackerel.API, host *mackere
 
 				tries := conf.Connection.Post_Metrics_Retry_Max
 				for {
-					err := api.PostMetricsValues(values)
+					err := api.PostMetricsValues(postValues)
 					if err == nil {
 						logger.Debugf("Posting metrics succeeded.")
 						break
